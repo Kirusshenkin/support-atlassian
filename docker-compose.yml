@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  # Сервис индексации документации
+  ingest:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: confluence-ingest
+    command: ["python", "-m", "src.ingest_with_report"]
+    env_file:
+      - .env
+    volumes:
+      - ./vector_store:/app/vector_store
+      - ./report:/app/report
+    networks:
+      - confluence-net
+    profiles:
+      - ingest
+
+  # QA API сервис
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: confluence-qa-api
+    command: ["python", "-m", "src.qa_service"]
+    env_file:
+      - .env
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - ./vector_store:/app/vector_store:ro
+    networks:
+      - confluence-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Slack бот
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: confluence-slack-bot
+    command: ["python", "-m", "src.slack_bot"]
+    env_file:
+      - .env
+    environment:
+      - QA_SERVICE_URL=http://api:8000
+    networks:
+      - confluence-net
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Планировщик для регулярного обновления индекса
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: confluence-scheduler
+    command: >
+      sh -c "
+      echo '30 1 * * * cd /app && python -m src.ingest_with_report >> /app/report/cron.log 2>&1' | crontab - &&
+      crond -f
+      "
+    env_file:
+      - .env
+    volumes:
+      - ./vector_store:/app/vector_store
+      - ./report:/app/report
+    networks:
+      - confluence-net
+    restart: unless-stopped
+    profiles:
+      - scheduler
+
+networks:
+  confluence-net:
+    driver: bridge
+
+volumes:
+  vector_store:
+    driver: local
+  report:
+    driver: local 

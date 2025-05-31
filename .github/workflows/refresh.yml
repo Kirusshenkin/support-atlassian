@@ -1,0 +1,92 @@
+name: Nightly Confluence Indexing
+
+on:
+  schedule:
+    # Запуск каждый день в 01:30 UTC
+    - cron: '30 1 * * *'
+  workflow_dispatch:  # Возможность ручного запуска
+
+jobs:
+  ingest:
+    name: Index Confluence Documentation
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run indexing
+        env:
+          CF_URL: ${{ secrets.CF_URL }}
+          CF_USER: ${{ secrets.CF_USER }}
+          CF_TOKEN: ${{ secrets.CF_TOKEN }}
+          CF_SPACE: ${{ secrets.CF_SPACE }}
+          CF_PAGES: ${{ secrets.CF_PAGES }}
+          VECTOR_STORE_PATH: ./vector_store
+          REPORT_DIR: ./report
+          LOG_LEVEL: INFO
+        run: |
+          python -m src.ingest_with_report
+      
+      - name: Upload reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: indexing-reports-${{ github.run_number }}
+          path: |
+            report/ingested.csv
+            report/skipped.csv
+          retention-days: 30
+      
+      - name: Upload vector store
+        uses: actions/upload-artifact@v3
+        with:
+          name: vector-store-${{ github.run_number }}
+          path: vector_store/
+          retention-days: 7
+      
+      - name: Create summary
+        if: always()
+        run: |
+          echo "## Indexing Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -f report/ingested.csv ]; then
+            echo "### Successfully Indexed Pages" >> $GITHUB_STEP_SUMMARY
+            echo "Total: $(tail -n +2 report/ingested.csv | wc -l)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -f report/skipped.csv ]; then
+            echo "### Skipped Pages" >> $GITHUB_STEP_SUMMARY
+            echo "Total: $(tail -n +2 report/skipped.csv | wc -l)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Title | Error Type |" >> $GITHUB_STEP_SUMMARY
+            echo "|-------|------------|" >> $GITHUB_STEP_SUMMARY
+            tail -n +2 report/skipped.csv | cut -d',' -f2,4 | head -10 | while IFS=',' read -r title error; do
+              echo "| $title | $error |" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+      
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: 'Nightly Confluence indexing failed',
+              body: `The nightly Confluence indexing workflow failed.\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['bug', 'automated']
+            }) 

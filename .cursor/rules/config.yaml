@@ -1,0 +1,126 @@
+# tech_spec.yaml
+meta:
+  project_name: ai-confluence-assistant
+  version: 1.0
+  created: 2025-05-31
+  language: python3.11
+  short_goal: >
+    Slack-бот, который отвечает на вопросы по документации Confluence,
+    используя семантический поиск (Chroma DB) + LLM-генерацию.
+
+stack:
+  python_packages:
+    - langchain>=0.2.0
+    - langchain-community
+    - chromadb>=0.5.0
+    - sentence-transformers>=2.5
+    - fastapi
+    - uvicorn[standard]
+    - slack_bolt>=1.18
+    - python-dotenv
+    - atlassian-python-api
+    - llama-cpp-python        # опционально, если нужен офлайн-LLM
+  external_services:
+    confluence:
+      auth: api_token
+      min_scope: read
+    slack:
+      auth: bot_token + app_token
+      mode: socket
+    openai:
+      model: gpt-4o-mini
+      note: "можно заменить на LlamaCpp + gguf"
+  storage:
+    vector_store: ./vector_store         # локальная папка с Chroma
+    reports: ./report                    # CSV-отчёты ingest
+
+env_vars:
+  CF_URL: "https://{tenant}.atlassian.net/wiki"
+  CF_USER: "bot@company.com"
+  CF_TOKEN: "********"
+  CF_SPACE: "PROJ"
+  CF_PAGES: "API Guidelines,Runbook"     # пусто → взять всё пространство
+  RETRIEVER_K: "4"
+  SLACK_BOT_TOKEN: "xoxb-***"
+  SLACK_APP_TOKEN: "xapp-***"
+  OPENAI_API_KEY: "sk-***"               # если используем OpenAI
+
+modules:
+  ingest_with_report:
+    path: src/ingest_with_report.py
+    purpose: >
+      Выгрузить страницы, разбить на чанки, посчитать эмбеддинги,
+      записать в Chroma, сформировать ingested.csv и skipped.csv.
+    schedule: "RRULE:FREQ=DAILY;BYHOUR=1;BYMINUTE=30"
+  qa_service:
+    path: src/qa_service.py
+    endpoint: /ask
+    method: POST
+    request_schema: { text: string, k?: int }
+    response_schema: { answer: string }
+  slack_bot:
+    path: src/slack_bot.py
+    trigger_regex: "^ask (.*)"
+    reply_format: |
+      *Q:* {question}
+      *A:* {answer}
+  docker:
+    compose_file: docker-compose.yml
+    services:
+      - ingest
+      - api
+      - bot
+
+pipelines:
+  ingest_flow:
+    - task: ingest_with_report
+      output:
+        - vector_store/*
+        - report/ingested.csv
+        - report/skipped.csv
+  qa_flow:
+    - trigger: slack_bot (ask …)
+    - http_call: qa_service /ask
+    - slack_reply
+
+tasks:
+  - id: T1
+    name: Create virtualenv & install deps
+  - id: T2
+    name: Implement ingest_with_report
+    deps: [T1]
+  - id: T3
+    name: Implement qa_service
+    deps: [T1]
+  - id: T4
+    name: Implement slack_bot
+    deps: [T3]
+  - id: T5
+    name: Dockerize all modules
+    deps: [T2, T3, T4]
+  - id: T6
+    name: GitHub Action nightly ingest
+    deps: [T2]
+  - id: T7
+    name: Documentation & README
+    deps: [T5]
+
+acceptance_tests:
+  - id: A1
+    desc: "POST /ask с текстом 'Where is health endpoint?' возвращает строку >20 символов"
+  - id: A2
+    desc: "Slack-сообщение 'ask project lead' выдаёт ответ ≤7 s"
+  - id: A3
+    desc: "После добавления новой Confluence-страницы nightly-ingest вносит её в ingested.csv и бот отвечает по ней без рестарта"
+  - id: A4
+    desc: "В skipped.csv появляется запись, если страница содержит draw.io, с error_type=UnsupportedContentType"
+
+deliverables:
+  - repo: ai-confluence-assistant (Git)
+  - files:
+      - tech_spec.yaml               # текущий документ
+      - src/*                        # исходники
+      - Dockerfile & docker-compose.yml
+      - README.md (quick-start)
+      - architecture.md (PlantUML диаграмма)
+      - .github/workflows/refresh.yml
